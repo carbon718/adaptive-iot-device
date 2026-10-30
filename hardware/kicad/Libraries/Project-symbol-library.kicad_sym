@@ -86,8 +86,8 @@
 				)
 			)
 			(pin input line
-				(at -12.6746 7.5946 0)
-				(length 2.5146)
+				(at -12.7 7.62 0)
+				(length 2.54)
 				(name "RF_SW1"
 					(effects
 						(font
@@ -104,8 +104,8 @@
 				)
 			)
 			(pin output line
-				(at -12.6746 5.0546 0)
-				(length 2.5146)
+				(at -12.7 5.08 0)
+				(length 2.54)
 				(name "MISO"
 					(effects
 						(font
@@ -122,8 +122,8 @@
 				)
 			)
 			(pin input line
-				(at -12.6746 2.5146 0)
-				(length 2.5146)
+				(at -12.7 2.54 0)
+				(length 2.54)
 				(name "MOSI"
 					(effects
 						(font
@@ -140,8 +140,8 @@
 				)
 			)
 			(pin input line
-				(at -12.6746 0 0)
-				(length 2.5146)
+				(at -12.7 0 0)
+				(length 2.54)
 				(name "SCK"
 					(effects
 						(font
@@ -158,8 +158,8 @@
 				)
 			)
 			(pin input line
-				(at -12.6746 -2.5146 0)
-				(length 2.5146)
+				(at -12.7 -2.54 0)
+				(length 2.54)
 				(name "RST"
 					(effects
 						(font
@@ -176,8 +176,8 @@
 				)
 			)
 			(pin input line
-				(at -12.6746 -5.0546 0)
-				(length 2.5146)
+				(at -12.7 -5.08 0)
+				(length 2.54)
 				(name "NSS"
 					(effects
 						(font
@@ -194,8 +194,8 @@
 				)
 			)
 			(pin power_in line
-				(at -12.6746 -7.5946 0)
-				(length 2.5146)
+				(at -12.7 -7.62 0)
+				(length 2.54)
 				(name "GND1"
 					(effects
 						(font
@@ -212,8 +212,8 @@
 				)
 			)
 			(pin power_in line
-				(at -12.6746 -10.1346 0)
-				(length 2.5146)
+				(at -12.7 -10.16 0)
+				(length 2.54)
 				(name "VCC"
 					(effects
 						(font
@@ -230,8 +230,8 @@
 				)
 			)
 			(pin passive line
-				(at 12.6746 -2.5146 180)
-				(length 2.5146)
+				(at 12.7 -2.54 180)
+				(length 2.54)
 				(name "ANT"
 					(effects
 						(font
@@ -248,8 +248,8 @@
 				)
 			)
 			(pin power_out line
-				(at 12.6746 0 180)
-				(length 2.5146)
+				(at 12.7 0 180)
+				(length 2.54)
 				(name "GND2"
 					(effects
 						(font
@@ -260,14 +260,14 @@
 				(number "10"
 					(effects
 						(font
-							(size 1.2573 1.2573)
+							(size 1.27 1.27)
 						)
 					)
 				)
 			)
 			(pin output line
-				(at 12.6746 2.5146 180)
-				(length 2.5146)
+				(at 12.7 2.54 180)
+				(length 2.54)
 				(name "BUSY"
 					(effects
 						(font
@@ -278,14 +278,14 @@
 				(number "11"
 					(effects
 						(font
-							(size 1.2573 1.2573)
+							(size 1.27 1.27)
 						)
 					)
 				)
 			)
 			(pin bidirectional line
-				(at 12.6746 5.0546 180)
-				(length 2.5146)
+				(at 12.7 5.08 180)
+				(length 2.54)
 				(name "DIO1"
 					(effects
 						(font
@@ -296,7 +296,7 @@
 				(number "12"
 					(effects
 						(font
-							(size 1.2573 1.2573)
+							(size 1.27 1.27)
 						)
 					)
 				)
