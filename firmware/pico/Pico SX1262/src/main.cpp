@@ -1,108 +1,143 @@
+
 #include <Arduino.h>
 #include <SPI.h>
 #include <RadioLib.h>
 
-// Raspberry Pi Pico - SPI0
-#define PIN_MISO   16
-#define PIN_MOSI   19
-#define PIN_SCK    18
+// ========================================
+// RASPBERRY PI PICO - SPI0
+// ========================================
 
-// Wio-SX1262
-#define PIN_RF_SW  15
-#define PIN_NSS    17
-#define PIN_RST    20
-#define PIN_BUSY   21
-#define PIN_DIO1   22
+#define PIN_SCK   10
+#define PIN_MISO  12
+#define PIN_MOSI  11
 
-// Parametry LoRa
-constexpr float LORA_FREQUENCY = 868.0;
-constexpr float LORA_BANDWIDTH = 125.0;
-constexpr uint8_t LORA_SF = 7;
-constexpr uint8_t LORA_CR = 5;
-constexpr int8_t LORA_POWER = 10;
-constexpr uint16_t LORA_PREAMBLE = 8;
+// ========================================
+// WIO-SX1262
+// ========================================
+#define PIN_NSS   13
+#define PIN_RST   14
+#define PIN_BUSY  8
+#define PIN_DIO1  9
+#define PIN_RF_SW 7
 
-// NSS, DIO1, RESET, BUSY
+// ========================================
+// RADIOLIB
+// Module(NSS, DIO1, RESET, BUSY)
+// ========================================
+
 SX1262 radio = new Module(
     PIN_NSS,
     PIN_DIO1,
     PIN_RST,
     PIN_BUSY,
-    SPI
+    SPI1
 );
 
-uint32_t packetCounter = 0;
+// ========================================
+// SETUP
+// ========================================
 
-
-void setup() {
+void setup()
+{
     Serial.begin(115200);
-    delay(2000);
+    delay(1500);
 
-    Serial.println("\n=== SX1262 DIAGNOSTIC ===");
+    Serial.println();
+    Serial.println("================================");
+    Serial.println("RASPBERRY PI PICO + Wio-SX1262");
+    Serial.println("Test inicjalizacji Peer B");
+    Serial.println("================================");
 
-    // Ustawienia GPIO
+    // GPIO
+    pinMode(PIN_RF_SW, OUTPUT);
     pinMode(PIN_NSS, OUTPUT);
-    digitalWrite(PIN_NSS, HIGH);
-
     pinMode(PIN_RST, OUTPUT);
-    digitalWrite(PIN_RST, HIGH);
-
     pinMode(PIN_BUSY, INPUT);
     pinMode(PIN_DIO1, INPUT);
 
-    pinMode(PIN_RF_SW, OUTPUT);
+    digitalWrite(PIN_NSS, HIGH);
+    digitalWrite(PIN_RST, HIGH);
+
+    // RF_SW - stan spoczynkowy
     digitalWrite(PIN_RF_SW, LOW);
 
     // SPI0
-    SPI.setRX(PIN_MISO);
-    SPI.setTX(PIN_MOSI);
-    SPI.setSCK(PIN_SCK);
-    SPI.begin();
+    SPI1.setSCK(PIN_SCK);
+    SPI1.setRX(PIN_MISO);
+    SPI1.setTX(PIN_MOSI);
+    SPI1.begin();
 
-    delay(100);
+    Serial.println("SPI0 uruchomione.");
 
-    Serial.println("SPI initialized");
-
-    // Ręczny reset SX1262
-    Serial.println("Resetting SX1262...");
-
-    digitalWrite(PIN_RST, LOW);
-    delay(100);
-
-    digitalWrite(PIN_RST, HIGH);
-    delay(200);
-
-    Serial.print("BUSY after reset: ");
+    Serial.print("BUSY przed resetem: ");
     Serial.println(digitalRead(PIN_BUSY));
 
-    Serial.print("MISO idle: ");
-    Serial.println(digitalRead(PIN_MISO));
+    // Reset sprzętowy SX1262
+    Serial.println("Reset SX1262...");
 
-    Serial.println("Calling radio.begin...");
+    digitalWrite(PIN_RST, LOW);
+    delay(2);
+
+    digitalWrite(PIN_RST, HIGH);
+    delay(20);
+
+    Serial.print("BUSY po resecie: ");
+    Serial.println(digitalRead(PIN_BUSY));
+
+    // Inicjalizacja LoRa
+    Serial.println("Wywoluje radio.begin(868 MHz)...");
 
     int16_t state = radio.begin(
-        868.0,
-        125.0,
-        7,
-        5,
-        RADIOLIB_SX126X_SYNC_WORD_PRIVATE,
-        10,
-        8,
-        1.8,
-        false
+        868.0,     // frequency [MHz]
+        125.0,     // bandwidth [kHz]
+        9,         // spreading factor
+        7,         // coding rate 4/7
+        0x12,      // sync word
+        10,        // output power [dBm]
+        8,         // preamble length
+        3.0,       // TCXO voltage [V]
+        false      // DC-DC regulator
     );
 
-    Serial.print("RadioLib result: ");
+    Serial.print("radio.begin() zwrocilo: ");
     Serial.println(state);
 
-    if (state == RADIOLIB_ERR_NONE) {
-        Serial.println("SUCCESS: SX1262 DETECTED!");
-    } else {
-        Serial.println("FAILED: SX1262 NOT DETECTED");
+    if (state == RADIOLIB_ERR_NONE)
+    {
+        Serial.println();
+        Serial.println("================================");
+        Serial.println("SX1262 ZAINICJALIZOWANY!");
+        Serial.println("Komunikacja SPI dziala.");
+        Serial.println("Peer B gotowy.");
+        Serial.println("Czestotliwosc: 868 MHz");
+        Serial.println("================================");
+    }
+    else
+    {
+        Serial.println();
+        Serial.println("BLAD INICJALIZACJI SX1262");
+
+        Serial.print("Kod bledu RadioLib: ");
+        Serial.println(state);
     }
 }
 
-void loop() {
-    delay(1000);
-}
+// ========================================
+// LOOP
+// ========================================
 
+void loop()
+{
+    static unsigned long previousTime = 0;
+
+    if (millis() - previousTime >= 2000)
+    {
+        previousTime = millis();
+
+        Serial.print("BUSY=");
+        Serial.print(digitalRead(PIN_BUSY));
+
+        Serial.print("  DIO1=");
+        Serial.println(digitalRead(PIN_DIO1));
+    }
+}
