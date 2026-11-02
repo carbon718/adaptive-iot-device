@@ -16,8 +16,8 @@
 // ========================================
 #define PIN_NSS   13
 #define PIN_RST   14
-#define PIN_BUSY  8
-#define PIN_DIO1  9
+#define PIN_BUSY  15
+#define PIN_DIO1  8
 #define PIN_RF_SW 7
 
 // ========================================
