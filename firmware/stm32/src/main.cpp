@@ -2,19 +2,53 @@
 #include <SPI.h>
 #include <RadioLib.h>
 
+// ========================================
+// USTAWIENIA LORA - MUSZA BYC TAKIE SAME
+// W PEER A I PEER B
+// ========================================
+
+#define LORA_FREQUENCY       868.0
+#define LORA_BANDWIDTH       125.0
+#define LORA_SPREADING       9
+#define LORA_CODING_RATE     7
+#define LORA_SYNC_WORD       0x12
+#define LORA_TX_POWER        10
+#define LORA_PREAMBLE        8
+#define LORA_TCXO            3.0
+#define LORA_USE_DCDC        false
+
+// ========================================
+// USTAWIENIA PROTOKOLU
+// ========================================
+
+#define MESSAGE_INTERVAL_MS  40000
+#define ACK_TIMEOUT_MS       3000
+#define MAX_RETRIES          3
+
+#define MESSAGE_TEXT         "Wiadomosc testowa z Peer A"
+
+// ========================================
 // NUCLEO-L476RG - SPI1
+// ========================================
+
 #define PIN_SCK     PA5
 #define PIN_MISO    PA6
 #define PIN_MOSI    PA7
 
-// Wio-SX1262
+// ========================================
+// WIO-SX1262
+// ========================================
+
 #define PIN_NSS     PB6
 #define PIN_RST     PA9
 #define PIN_BUSY    PC7
 #define PIN_DIO1    PA8
 #define PIN_RF_SW   PB10
 
-// RadioLib: NSS, DIO1, RESET, BUSY
+// ========================================
+// RADIO
+// ========================================
+
 SX1262 radio = new Module(
     PIN_NSS,
     PIN_DIO1,
@@ -23,6 +57,12 @@ SX1262 radio = new Module(
     SPI
 );
 
+uint32_t packetCounter = 0;
+
+// ========================================
+// INICJALIZACJA
+// ========================================
+
 void setup()
 {
     Serial.begin(115200);
@@ -30,11 +70,10 @@ void setup()
 
     Serial.println();
     Serial.println("================================");
-    Serial.println("NUCLEO-L476RG + Wio-SX1262");
-    Serial.println("Test inicjalizacji");
+    Serial.println("PEER A - NADAJNIK LORA");
+    Serial.println("NUCLEO-L476RG + SX1262");
     Serial.println("================================");
 
-    // GPIO
     pinMode(PIN_RF_SW, OUTPUT);
     pinMode(PIN_NSS, OUTPUT);
     pinMode(PIN_RST, OUTPUT);
@@ -44,90 +83,169 @@ void setup()
     digitalWrite(PIN_NSS, HIGH);
     digitalWrite(PIN_RST, HIGH);
 
-    // RF_SW - stan zalezy od polaryzacji modulu
-    digitalWrite(PIN_RF_SW, LOW);
-
-    // SPI1: PA5, PA6, PA7
     SPI.begin();
 
     Serial.println("SPI uruchomione.");
 
-    Serial.print("BUSY przed resetem: ");
-    Serial.println(digitalRead(PIN_BUSY));
-
-    // Reset sprzetowy
-    Serial.println("Reset SX1262...");
-
-    digitalWrite(PIN_RST, LOW);
-    delay(2);
-
-    digitalWrite(PIN_RST, HIGH);
-    delay(20);
-
-    Serial.print("BUSY po resecie: ");
-    Serial.println(digitalRead(PIN_BUSY));
-
-    Serial.println("Wywoluje radio.begin(868 MHz)...");
-
-    // Europejskie pasmo LoRa
     int16_t state = radio.begin(
-      868.0,     // frequency [MHz]
-      125.0,     // bandwidth [kHz]
-      9,         // spreading factor
-      7,         // coding rate 4/7
-      0x12,      // sync word
-      10,        // output power [dBm]
-      8,         // preamble length
-      3.0,       // TCXO voltage - do weryfikacji
-      false      // DC-DC regulator
+        LORA_FREQUENCY,
+        LORA_BANDWIDTH,
+        LORA_SPREADING,
+        LORA_CODING_RATE,
+        LORA_SYNC_WORD,
+        LORA_TX_POWER,
+        LORA_PREAMBLE,
+        LORA_TCXO,
+        LORA_USE_DCDC
     );
 
-
-    Serial.print("radio.begin() zwrocilo: ");
+    Serial.print("radio.begin(): ");
     Serial.println(state);
 
-    if (state == RADIOLIB_ERR_NONE)
+    if (state != RADIOLIB_ERR_NONE)
+    {
+        Serial.println("BLAD INICJALIZACJI SX1262!");
+        while (true) {
+            delay(1000);
+        }
+    }
+
+    Serial.println("SX1262 GOTOWY!");
+    Serial.println("PEER A rozpoczyna transmisje.");
+}
+
+// ========================================
+// WYSYLANIE WIADOMOSCI I OCZEKIWANIE NA ACK
+// ========================================
+
+void sendMessage()
+{
+    packetCounter++;
+
+    String packet = "DATA:";
+    packet += packetCounter;
+    packet += ":";
+    packet += MESSAGE_TEXT;
+
+    Serial.println();
+    Serial.println("--------------------------------");
+    Serial.print("Wysylam pakiet nr: ");
+    Serial.println(packetCounter);
+
+    Serial.print("Tresc: ");
+    Serial.println(MESSAGE_TEXT);
+
+    bool acknowledged = false;
+
+    for (int attempt = 1; attempt <= MAX_RETRIES; attempt++)
     {
         Serial.println();
+        Serial.print("Proba transmisji: ");
+        Serial.print(attempt);
+        Serial.print("/");
+        Serial.println(MAX_RETRIES);
+
+        // Nadawanie
+        digitalWrite(PIN_RF_SW, HIGH);
+        delay(2);
+
+        int16_t txState = radio.transmit(packet);
+
+        if (txState != RADIOLIB_ERR_NONE)
+        {
+            Serial.print("Blad TX: ");
+            Serial.println(txState);
+            continue;
+        }
+
+        Serial.println("Pakiet wyslany.");
+
+        // Oczekiwanie na ACK
+        digitalWrite(PIN_RF_SW, LOW);
+        delay(2);
+
+        Serial.println("Oczekiwanie na ACK...");
+
+        String response;
+
+        int16_t rxState = radio.receive(
+            response,
+            0,
+            ACK_TIMEOUT_MS
+        );
+
+        if (rxState == RADIOLIB_ERR_NONE)
+        {
+            String expectedACK = "ACK:";
+            expectedACK += packetCounter;
+
+            if (response == expectedACK)
+            {
+                Serial.println();
+                Serial.println("< ACK OTRZYMANY >");
+
+                Serial.print("Potwierdzenie: ");
+                Serial.println(response);
+
+                Serial.print("RSSI: ");
+                Serial.print(radio.getRSSI());
+                Serial.println(" dBm");
+
+                Serial.print("SNR: ");
+                Serial.print(radio.getSNR());
+                Serial.println(" dB");
+
+                acknowledged = true;
+                break;
+            }
+            else
+            {
+                Serial.print("Otrzymano nieprawidlowe ACK: ");
+                Serial.println(response);
+            }
+        }
+        else if (rxState == RADIOLIB_ERR_RX_TIMEOUT)
+        {
+            Serial.println("TIMEOUT - brak ACK.");
+        }
+        else
+        {
+            Serial.print("Blad RX: ");
+            Serial.println(rxState);
+        }
+    }
+
+    Serial.println();
+
+    if (acknowledged)
+    {
         Serial.println("================================");
-        Serial.println("SX1262 ZAINICJALIZOWANY!");
-        Serial.println("Komunikacja SPI dziala.");
-        Serial.println("Czestotliwosc: 868 MHz");
+        Serial.println("WIADOMOSC DOSTARCZONA!");
         Serial.println("================================");
     }
     else
     {
-        Serial.println();
-        Serial.println("BLAD INICJALIZACJI SX1262");
-
-        if (state == RADIOLIB_ERR_CHIP_NOT_FOUND)
-        {
-            Serial.println("RadioLib nie wykrywa ukladu.");
-            Serial.println("Sprawdz polaczenia:");
-            Serial.println("3V3, GND");
-            Serial.println("SCK, MISO, MOSI");
-            Serial.println("NSS, RESET, BUSY");
-        }
-        else
-        {
-            Serial.print("Kod bledu RadioLib: ");
-            Serial.println(state);
-        }
+        Serial.println("================================");
+        Serial.println("NIE OTRZYMANO ACK!");
+        Serial.println("Nie potwierdzono dostarczenia.");
+        Serial.println("================================");
     }
+
+    // Powrot do nasluchiwania przed nastepnym cyklem
+    digitalWrite(PIN_RF_SW, LOW);
 }
+
+// ========================================
+// LOOP
+// ========================================
 
 void loop()
 {
     static unsigned long previousTime = 0;
 
-    if (millis() - previousTime >= 2000)
+    if (millis() - previousTime >= MESSAGE_INTERVAL_MS)
     {
         previousTime = millis();
-
-        Serial.print("BUSY=");
-        Serial.print(digitalRead(PIN_BUSY));
-
-        Serial.print("  DIO1=");
-        Serial.println(digitalRead(PIN_DIO1));
+        sendMessage();
     }
 }
