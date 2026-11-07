@@ -40,10 +40,12 @@ void setup() {
     Serial.begin(115200);
     delay(1500);
 
-    // Enable ARM Cortex-M DWT cycle counter for precise timing measurements
-    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
-    DWT->CYCCNT = 0;
-    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    #if DEBUG_TX_TIME
+        // Enable ARM Cortex-M DWT cycle counter for precise timing measurements
+        CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+        DWT->CYCCNT = 0;
+        DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    #endif
 
     #if ENABLE_LORA
         if (!loraInit()) {
@@ -53,7 +55,6 @@ void setup() {
         }
     #endif
 }
-
 void loop() {
     static unsigned long previousTime = 0;
 
