@@ -3,7 +3,7 @@
 #include <SPI.h>
 #include <RadioLib.h>
 
-#define LORA_DUTY_CYCLE 0.01f
+#define LORA_DUTY_CYCLE 0.01
 
 static SX1262 radio = new Module(
     PIN_NSS,
@@ -13,26 +13,10 @@ static SX1262 radio = new Module(
     SPI
 );
 
-// Flag for DIO1 interrupt (TxDone) - always required for non-blocking TX
+// Flag and timestamp for DIO1 interrupt (TxDone)
 static volatile bool txDoneFlag = false;
-
 #if DEBUG_TX_TIME
     static volatile uint32_t isrTimestampCycles = 0;
-
-    #define MEASUREMENT_COUNT 1000
-
-    struct TxMeasurement {
-        uint32_t sequence;
-        uint32_t mcuStartUs;
-        uint32_t rfTxUs;
-        uint32_t mcuFinishUs;
-        uint32_t totalOpUs;
-        int16_t txStatus;
-        int16_t sleepStatus;
-    };
-
-    static TxMeasurement measurements[MEASUREMENT_COUNT];
-    static uint32_t measurementCount = 0;
 #endif
 
 // Interrupt Service Routine (ISR) triggered when RF transmission finishes
@@ -50,9 +34,13 @@ bool loraInit() {
     pinMode(PIN_BUSY, INPUT);
     pinMode(PIN_DIO1, INPUT);
 
+    digitalWrite(PIN_RF_SW, LOW);
     digitalWrite(PIN_NSS, HIGH);
     digitalWrite(PIN_RST, HIGH);
 
+    SPI.setMISO(PIN_MISO);
+    SPI.setMOSI(PIN_MOSI);
+    SPI.setSCLK(PIN_SCK);
     SPI.begin();
 
     #if DEBUG_SERIAL
@@ -126,8 +114,8 @@ bool loraSendMessage(const uint8_t* frame, size_t length) {
         Serial.println();
     #endif
     
-    // Wake up SX1262 from sleep mode
-    int16_t wakeState = radio.standby();
+    // Wake up SX1262 from sleep mode and stabilize XOSC/TCXO before timing SPI setup
+    int16_t wakeState = radio.standby(RADIOLIB_SX126X_STANDBY_XOSC);
     if (wakeState != RADIOLIB_ERR_NONE) {
         #if DEBUG_SERIAL
             Serial.print("LoRa wake-up error: ");
@@ -145,14 +133,13 @@ bool loraSendMessage(const uint8_t* frame, size_t length) {
         Serial.print("Theoretical RF Time-on-Air: ");
         Serial.print(toaUs);
         Serial.print(" us (");
-        Serial.print(toaUs / 1000.0f, 3);
+        Serial.print((double)toaUs / 1000.0, 3);
         Serial.println(" ms)");
 
-        // Calculate the minimum TX cooldown time required to maintain the configured RF duty cycle
         uint64_t minWaitUs = (uint64_t)ceil(
             (double)toaUs * ((1.0 / LORA_DUTY_CYCLE) - 1.0)
         );
-        Serial.print("Minimum TX cooldown time: ");
+        Serial.print("Minimum TX cooldown time:   ");
         Serial.print((double)minWaitUs / 1000.0, 3);
         Serial.println(" ms");
     #endif
@@ -171,7 +158,6 @@ bool loraSendMessage(const uint8_t* frame, size_t length) {
 
     if (txState == RADIOLIB_ERR_NONE) {
         // --- STAGE 2: Actual over-the-air transmission (wait for DIO1 interrupt) ---
-        // 5-second safety timeout in case the interrupt does not fire
         uint32_t waitStartMs = millis();
         while (!txDoneFlag) {
             if (millis() - waitStartMs > 5000) {
@@ -194,43 +180,47 @@ bool loraSendMessage(const uint8_t* frame, size_t length) {
 
         if (txState == RADIOLIB_ERR_NONE) {
             txState = finishState;
+
+            #if DEBUG_TX_TIME
+                uint32_t cpuFreq = HAL_RCC_GetHCLKFreq();
+                double cyclesToUs = 1000000.0 / (double)cpuFreq;
+
+                uint32_t setupCycles   = (uint32_t)(t1 - t0);
+                uint32_t rfCycles      = (uint32_t)(t2 - t1);
+                uint32_t cleanupCycles = (uint32_t)(t4 - t3);
+                uint32_t totalCycles   = (uint32_t)(t4 - t0);
+
+                double mcuStartUs  = (double)setupCycles * cyclesToUs;
+                double rfTxTimeUs  = (double)rfCycles * cyclesToUs;
+                double mcuFinishUs = (double)cleanupCycles * cyclesToUs;
+                double mcuTotalUs  = mcuStartUs + mcuFinishUs;
+                double totalOpUs   = (double)totalCycles * cyclesToUs;
+
+                Serial.print("MCU busy time (SPI setup + cleanup): ");
+                Serial.print(mcuTotalUs, 3);
+                Serial.print(" us (setup: ");
+                Serial.print(mcuStartUs, 2);
+                Serial.print(" us, cleanup: ");
+                Serial.print(mcuFinishUs, 2);
+                Serial.println(" us)");
+
+                Serial.print("Actual RF transmission time (DIO1):  ");
+                Serial.print(rfTxTimeUs, 3);
+                Serial.print(" us (");
+                Serial.print(rfTxTimeUs / 1000.0, 3);
+                Serial.println(" ms)");
+
+                Serial.print("Actual total TX operation time:      ");
+                Serial.print(totalOpUs, 3);
+                Serial.print(" us (");
+                Serial.print(totalOpUs / 1000.0, 3);
+                Serial.println(" ms)");
+            #endif
         }
-
-        #if DEBUG_TX_TIME
-            uint32_t cpuFreq = HAL_RCC_GetHCLKFreq();
-            float cyclesToUs = 1000000.0f / (float)cpuFreq;
-
-            float mcuStartUs  = (float)(t1 - t0) * cyclesToUs; // SPI setup time (startTransmit)
-            float rfTxTimeUs  = (float)(t2 - t1) * cyclesToUs; // Over-the-air TX time (until DIO1 ISR)
-            float mcuFinishUs = (float)(t4 - t3) * cyclesToUs; // SPI cleanup time (finishTransmit)
-            float mcuTotalUs  = mcuStartUs + mcuFinishUs;      // Total MCU active SPI time
-            float totalOpUs   = (float)(t4 - t0) * cyclesToUs; // Total operation time (equivalent to blocking radio.transmit)
-
-            Serial.print("MCU busy time (SPI setup + cleanup): ");
-            Serial.print(mcuTotalUs, 3);
-            Serial.print(" us (setup: ");
-            Serial.print(mcuStartUs, 2);
-            Serial.print(" us, cleanup: ");
-            Serial.print(mcuFinishUs, 2);
-            Serial.println(" us)");
-
-            Serial.print("Actual RF transmission time (DIO1):  ");
-            Serial.print(rfTxTimeUs, 3);
-            Serial.print(" us (");
-            Serial.print(rfTxTimeUs / 1000.0f, 3);
-            Serial.println(" ms)");
-
-            Serial.print("Actual total TX operation time:      ");
-            Serial.print(totalOpUs, 3);
-            Serial.print(" us (");
-            Serial.print(totalOpUs / 1000.0f, 3);
-            Serial.println(" ms)");
-        #endif
     }
     
     // Set the RF switch back to low state after transmission is complete
     digitalWrite(PIN_RF_SW, LOW);
-    delay(2);
     
     // Put SX1262 into sleep mode (retain configuration in warm start)
     int16_t sleepState = radio.sleep(true);
