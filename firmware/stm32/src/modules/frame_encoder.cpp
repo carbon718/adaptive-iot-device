@@ -13,7 +13,7 @@ static inline void writeBE32(uint8_t* buf, uint32_t val) {
     buf[3] = (uint8_t)(val & 0xFF);
 }
 
-// Calculate CRC-16 (MODBUS polynomial: 0xA001)
+// Calculate CRC-16 (polynomial 0x8005 / reflected 0xA001, init 0xFFFF)
 uint16_t calculateCRC16(const uint8_t* data, size_t length) {
     uint16_t crc = 0xFFFF;
     for (size_t i = 0; i < length; i++) {

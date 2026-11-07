@@ -26,7 +26,7 @@
 #define LORA_SPREADING          9
 #define LORA_CODING_RATE        5
 #define LORA_SYNC_WORD          0x12
-#define LORA_TX_POWER           10
+#define LORA_TX_POWER           2
 #define LORA_PREAMBLE           8
 #define LORA_TCXO               3.0
 #define LORA_USE_DCDC           false
