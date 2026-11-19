@@ -1,23 +1,19 @@
 #pragma once
-
 #include <Arduino.h>
+#include "frame.h"
 
-struct LoRaPacketStats {
-    float rssi;               // Average packet RSSI [dBm]
-    float signalRssi;         // Estimated LoRa signal power after despreading [dBm]
-    float snr;                // Signal-to-Noise Ratio [dB]
-    float freqErrorHz;        // Carrier frequency offset [Hz]
-    float freqErrorPpm;       // Carrier frequency offset [ppm]
-    float snrMarginDb;        // Margin above theoretical SF demodulation floor [dB]
-    float estimatedPathLoss;  // Estimated RF path loss (TX Power - RSSI) [dB]
-    uint32_t timeOnAirUs;     // Theoretical Time-on-Air for received packet length [us]
-    float effectiveBitrateBps;// Effective PHY bitrate for this frame [bps]
+// Signal parameters of the last received LoRa packet
+struct LoRaRxInfo {
+    float rssi;     // dBm
+    float snr;      // dB
 };
 
+// Initializes SX1262 and starts continuous reception.
 bool loraInit();
-bool loraReceiveMessage(
-    uint8_t* outBuffer,
-    size_t maxLength,
-    size_t* outLength,
-    LoRaPacketStats* outStats
-);
+
+// Non-blocking. If a packet has been received, copies it into buffer and returns
+// its length. Returns 0 when nothing was received (or on error).
+size_t loraReceive(uint8_t* buffer, size_t bufferSize, LoRaRxInfo* outInfo);
+
+// Encodes the frame, transmits it and returns to continuous reception.
+bool loraSendFrame(const Frame& frame);

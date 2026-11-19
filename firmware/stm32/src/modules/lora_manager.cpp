@@ -3,49 +3,59 @@
 #include <SPI.h>
 #include <RadioLib.h>
 
-#define LORA_DUTY_CYCLE 0.01
+static SX1262 radio = new Module(PIN_NSS, PIN_DIO1, PIN_RST, PIN_BUSY, SPI);
 
-static SX1262 radio = new Module(
-    PIN_NSS,
-    PIN_DIO1,
-    PIN_RST,
-    PIN_BUSY,
-    SPI
-);
+// Sum of Time-on-Air of all transmissions since last loraTakeTxAirtimeUs() call
+static uint32_t txAirtimeUs = 0;
 
-// Flag and timestamp for DIO1 interrupt (TxDone)
-static volatile bool txDoneFlag = false;
+// Set by DIO1 interrupt when TX or RX operation finishes
+static volatile bool operationDone = false;
 #if DEBUG_TX_TIME
-    static volatile uint32_t isrTimestampCycles = 0;
+    static volatile uint32_t isrCycles = 0;
 #endif
 
-// Interrupt Service Routine (ISR) triggered when RF transmission finishes
-void onTxDoneISR() {
+static void onDio1ISR() {
     #if DEBUG_TX_TIME
-        isrTimestampCycles = DWT->CYCCNT;
+        isrCycles = DWT->CYCCNT;
     #endif
-    txDoneFlag = true;
+    operationDone = true;
 }
 
+// Busy-waits for the DIO1 interrupt. Returns false on timeout.
+static bool waitForOperation(uint32_t timeoutMs) {
+    uint32_t start = millis();
+    while (!operationDone) {
+        if (millis() - start > timeoutMs) {
+            return false;
+        }
+    }
+    return true;
+}
+
+#if DEBUG_SERIAL
+static void printHex(const uint8_t* data, size_t length) {
+    for (size_t i = 0; i < length; i++) {
+        if (data[i] < 0x10) Serial.print('0');
+        Serial.print(data[i], HEX);
+        Serial.print(' ');
+    }
+    Serial.println();
+}
+#endif
+
+#if DEBUG_TX_TIME
+static double cyclesToUs(uint32_t cycles) {
+    return (double)cycles * 1000000.0 / (double)HAL_RCC_GetHCLKFreq();
+}
+#endif
+
+// ----------------------------------------------------------------------------
+
 bool loraInit() {
-    pinMode(PIN_RF_SW, OUTPUT);
-    pinMode(PIN_NSS, OUTPUT);
-    pinMode(PIN_RST, OUTPUT);
-    pinMode(PIN_BUSY, INPUT);
-    pinMode(PIN_DIO1, INPUT);
-
-    digitalWrite(PIN_RF_SW, LOW);
-    digitalWrite(PIN_NSS, HIGH);
-    digitalWrite(PIN_RST, HIGH);
-
     SPI.setMISO(PIN_MISO);
     SPI.setMOSI(PIN_MOSI);
     SPI.setSCLK(PIN_SCK);
     SPI.begin();
-
-    #if DEBUG_SERIAL
-        Serial.println("SPI has been initialized.");
-    #endif
 
     int16_t state = radio.begin(
         LORA_FREQUENCY,
@@ -55,192 +65,237 @@ bool loraInit() {
         LORA_SYNC_WORD,
         LORA_TX_POWER,
         LORA_PREAMBLE,
-        LORA_TCXO,
-        LORA_USE_DCDC
+        LORA_TCXO_VOLTAGE,
+        LORA_USE_LDO
     );
-
-    #if DEBUG_SERIAL
-        Serial.print("radio.begin(): ");
-        Serial.println(state);
-    #endif
 
     if (state != RADIOLIB_ERR_NONE) {
         #if DEBUG_SERIAL
-            Serial.println("Failed to initialize LoRa SX1262 module.");
+            Serial.print("SX1262 init failed, code: ");
+            Serial.println(state);
         #endif
         return false;
     }
 
-    // Set the DIO1 interrupt handler for TxDone event
-    radio.setDio1Action(onTxDoneISR);
+    // Wio-SX1262 RF switch: DIO2 enables TX path (RadioLib default),
+    // RF_SW pin must be HIGH during RX (datasheet, pin 1). RadioLib drives it automatically.
+    radio.setRfSwitchPins(PIN_RF_SW, RADIOLIB_NC);
+
+    radio.setDio1Action(onDio1ISR);
+    radio.sleep(true);
 
     #if DEBUG_SERIAL
-        Serial.println("LoRa SX1262 module has been initialized.");
+        Serial.println("SX1262 initialized.");
+    #endif
+    return true;
+}
+
+void loraSleep() {
+    radio.sleep(true);
+}
+
+uint32_t loraTakeTxAirtimeUs() {
+    uint32_t airtime = txAirtimeUs;
+    txAirtimeUs = 0;
+    return airtime;
+}
+
+uint32_t loraTimeOnAirUs(size_t frameLength) {
+    // Calculated from config.h parameters - no SPI access, radio may stay asleep
+    DataRate_t dataRate = {};
+    dataRate.lora.spreadingFactor = LORA_SPREADING;
+    dataRate.lora.bandwidth       = LORA_BANDWIDTH;
+    dataRate.lora.codingRate      = LORA_CODING_RATE;
+
+    PacketConfig_t packet = {};
+    packet.lora.preambleLength = LORA_PREAMBLE;
+    packet.lora.implicitHeader = false;
+    packet.lora.crcEnabled     = true;
+    // RadioLib enables low data rate optimization when symbol time >= 16 ms
+    packet.lora.ldrOptimize    = ((float)(1UL << LORA_SPREADING) / LORA_BANDWIDTH) >= 16.0f;
+
+    return (uint32_t)radio.calculateTimeOnAir(RADIOLIB_MODEM_LORA, dataRate, packet, frameLength);
+}
+
+// Transmits raw bytes and waits for TxDone.
+static bool loraTransmit(const uint8_t* data, size_t length) {
+    #if DEBUG_SERIAL
+        Serial.print("TX (");
+        Serial.print(length);
+        Serial.print(" B): ");
+        printHex(data, length);
+    #endif
+
+    // Wake up SX1262 and let TCXO stabilize before timing measurement
+    radio.standby(RADIOLIB_SX126X_STANDBY_XOSC);
+
+    #if DEBUG_TX_TIME
+        RadioLibTime_t toaUs = radio.getTimeOnAir(length);
+        Serial.print("Time-on-Air (theoretical): ");
+        Serial.print(toaUs / 1000.0, 3);
+        Serial.print(" ms, duty-cycle cooldown: ");
+        Serial.print(toaUs * (100.0 / LORA_DUTY_CYCLE_PERCENT - 1.0) / 1000.0, 3);
+        Serial.println(" ms");
+    #endif
+
+    operationDone = false;
+
+    #if DEBUG_TX_TIME
+        uint32_t t0 = DWT->CYCCNT;
+    #endif
+    int16_t state = radio.startTransmit(data, length);  // SPI: load buffer + start TX
+    #if DEBUG_TX_TIME
+        uint32_t t1 = DWT->CYCCNT;
+    #endif
+
+    if (state == RADIOLIB_ERR_NONE) {
+        txAirtimeUs += (uint32_t)radio.getTimeOnAir(length);   // counted for duty cycle
+    }
+
+    if (state == RADIOLIB_ERR_NONE && !waitForOperation(TX_TIMEOUT_MS)) {
+        state = RADIOLIB_ERR_TX_TIMEOUT;
+    }
+
+    #if DEBUG_TX_TIME
+        uint32_t t2 = isrCycles;
+        uint32_t t3 = DWT->CYCCNT;
+    #endif
+    int16_t finishState = radio.finishTransmit();       // SPI: clear IRQ, go to standby
+    #if DEBUG_TX_TIME
+        uint32_t t4 = DWT->CYCCNT;
+    #endif
+
+    if (state == RADIOLIB_ERR_NONE) {
+        state = finishState;
+    }
+
+    if (state != RADIOLIB_ERR_NONE) {
+        #if DEBUG_SERIAL
+            Serial.print("TX error, code: ");
+            Serial.println(state);
+        #endif
+        return false;
+    }
+
+    #if DEBUG_TX_TIME
+        Serial.print("MCU SPI setup: ");
+        Serial.print(cyclesToUs(t1 - t0), 2);
+        Serial.print(" us, RF TX (DIO1): ");
+        Serial.print(cyclesToUs(t2 - t1) / 1000.0, 3);
+        Serial.print(" ms, MCU cleanup: ");
+        Serial.print(cyclesToUs(t4 - t3), 2);
+        Serial.println(" us");
     #endif
 
     return true;
 }
 
-bool loraSendMessage(const uint8_t* frame, size_t length) {
-    // 1. Validate buffer pointer and minimum frame size (Header + CRC = 12 B)
-    if (frame == nullptr || length < FRAME_OVERHEAD) {
+bool loraSendFrame(const Frame& frame) {
+    uint8_t buffer[LORA_MAX_PHY_SIZE];
+
+    size_t length = encodeFrame(frame, buffer, sizeof(buffer));
+    if (length == 0) {
         #if DEBUG_SERIAL
-            Serial.println("LoRa TX Error: Empty buffer or frame smaller than header!");
+            Serial.print("Frame encode error (payload ");
+            Serial.print(frame.payloadLength);
+            Serial.print(" B, max ");
+            Serial.print(LORA_MAX_PAYLOAD_SIZE);
+            Serial.println(" B).");
         #endif
         return false;
     }
 
-    // 2. Validate size against the technological limit of LoRa PHY (255 B for SX1262)
-    if (length > LORA_MAX_PHY_SIZE) {
+    return loraTransmit(buffer, length);
+}
+
+size_t loraReceive(uint8_t* buffer, size_t bufferSize, uint32_t timeoutMs, LoRaRxInfo* outInfo) {
+    operationDone = false;
+
+    if (radio.startReceive() != RADIOLIB_ERR_NONE) {
+        return 0;
+    }
+
+    if (!waitForOperation(timeoutMs)) {
+        radio.standby();
+        return 0;   // timeout
+    }
+
+    size_t length = radio.getPacketLength();
+    if (length == 0 || length > bufferSize) {
+        radio.standby();
+        return 0;
+    }
+
+    int16_t state = radio.readData(buffer, length);
+    if (outInfo != nullptr) {
+        outInfo->rssi = radio.getRSSI();
+        outInfo->snr  = radio.getSNR();
+    }
+    radio.standby();
+
+    if (state != RADIOLIB_ERR_NONE) {
         #if DEBUG_SERIAL
-            Serial.print("LoRa PHY Error: Frame too large (");
-            Serial.print(length);
-            Serial.print(" B > max ");
-            Serial.print(LORA_MAX_PHY_SIZE);
-            Serial.println(" B)!");
+            Serial.print("RX error, code: ");
+            Serial.println(state);
         #endif
-        return false;
+        return 0;
     }
 
     #if DEBUG_SERIAL
-        Serial.print("Sending LoRa frame (");
+        Serial.print("RX (");
         Serial.print(length);
-        Serial.println(" B):");
-        for (size_t i = 0; i < length; i++) {
-            if (frame[i] < 0x10) Serial.print("0");
-            Serial.print(frame[i], HEX);
-            Serial.print(" ");
-        }
-        Serial.println();
+        Serial.print(" B): ");
+        printHex(buffer, length);
     #endif
-    
-    // Wake up SX1262 from sleep mode and stabilize XOSC/TCXO before timing SPI setup
-    int16_t wakeState = radio.standby(RADIOLIB_SX126X_STANDBY_XOSC);
-    if (wakeState != RADIOLIB_ERR_NONE) {
+    return length;
+}
+
+// Receives one packet and checks that it is a valid ACK for the given frame.
+static bool receiveAck(const Frame& frame, AckPayload* outAck, LoRaRxInfo* outRxInfo) {
+    uint8_t buffer[LORA_MAX_PHY_SIZE];
+
+    size_t length = loraReceive(buffer, sizeof(buffer), LORA_ACK_TIMEOUT_MS, outRxInfo);
+    if (length == 0) {
         #if DEBUG_SERIAL
-            Serial.print("LoRa wake-up error: ");
-            Serial.println(wakeState);
+            Serial.println("ACK timeout.");
         #endif
         return false;
     }
 
-    // Enable the RF switch before transmission
-    digitalWrite(PIN_RF_SW, HIGH);
-    delay(2);
-
-    #if DEBUG_TX_TIME
-        RadioLibTime_t toaUs = radio.getTimeOnAir(length);
-        Serial.print("Theoretical RF Time-on-Air: ");
-        Serial.print(toaUs);
-        Serial.print(" us (");
-        Serial.print((double)toaUs / 1000.0, 3);
-        Serial.println(" ms)");
-
-        uint64_t minWaitUs = (uint64_t)ceil(
-            (double)toaUs * ((1.0 / LORA_DUTY_CYCLE) - 1.0)
-        );
-        Serial.print("Minimum TX cooldown time:   ");
-        Serial.print((double)minWaitUs / 1000.0, 3);
-        Serial.println(" ms");
-    #endif
-
-    // Reset interrupt flag before starting transmission
-    txDoneFlag = false;
-
-    // --- STAGE 1: Load frame over SPI and start transmitter ---
-    #if DEBUG_TX_TIME
-        uint32_t t0 = DWT->CYCCNT;
-    #endif
-    int16_t txState = radio.startTransmit(const_cast<uint8_t*>(frame), length);
-    #if DEBUG_TX_TIME
-        uint32_t t1 = DWT->CYCCNT;
-    #endif
-
-    if (txState == RADIOLIB_ERR_NONE) {
-        // --- STAGE 2: Actual over-the-air transmission (wait for DIO1 interrupt) ---
-        uint32_t waitStartMs = millis();
-        while (!txDoneFlag) {
-            if (millis() - waitStartMs > 5000) {
-                txState = RADIOLIB_ERR_TX_TIMEOUT;
-                break;
-            }
-        }
-        #if DEBUG_TX_TIME
-            uint32_t t2 = isrTimestampCycles;
-        #endif
-
-        // --- STAGE 3: Finish transmission (clear IRQ flags over SPI) ---
-        #if DEBUG_TX_TIME
-            uint32_t t3 = DWT->CYCCNT;
-        #endif
-        int16_t finishState = radio.finishTransmit();
-        #if DEBUG_TX_TIME
-            uint32_t t4 = DWT->CYCCNT;
-        #endif
-
-        if (txState == RADIOLIB_ERR_NONE) {
-            txState = finishState;
-
-            #if DEBUG_TX_TIME
-                uint32_t cpuFreq = HAL_RCC_GetHCLKFreq();
-                double cyclesToUs = 1000000.0 / (double)cpuFreq;
-
-                uint32_t setupCycles   = (uint32_t)(t1 - t0);
-                uint32_t rfCycles      = (uint32_t)(t2 - t1);
-                uint32_t cleanupCycles = (uint32_t)(t4 - t3);
-                uint32_t totalCycles   = (uint32_t)(t4 - t0);
-
-                double mcuStartUs  = (double)setupCycles * cyclesToUs;
-                double rfTxTimeUs  = (double)rfCycles * cyclesToUs;
-                double mcuFinishUs = (double)cleanupCycles * cyclesToUs;
-                double mcuTotalUs  = mcuStartUs + mcuFinishUs;
-                double totalOpUs   = (double)totalCycles * cyclesToUs;
-
-                Serial.print("MCU busy time (SPI setup + cleanup): ");
-                Serial.print(mcuTotalUs, 3);
-                Serial.print(" us (setup: ");
-                Serial.print(mcuStartUs, 2);
-                Serial.print(" us, cleanup: ");
-                Serial.print(mcuFinishUs, 2);
-                Serial.println(" us)");
-
-                Serial.print("Actual RF transmission time (DIO1):  ");
-                Serial.print(rfTxTimeUs, 3);
-                Serial.print(" us (");
-                Serial.print(rfTxTimeUs / 1000.0, 3);
-                Serial.println(" ms)");
-
-                Serial.print("Actual total TX operation time:      ");
-                Serial.print(totalOpUs, 3);
-                Serial.print(" us (");
-                Serial.print(totalOpUs / 1000.0, 3);
-                Serial.println(" ms)");
-            #endif
-        }
-    }
-    
-    // Set the RF switch back to low state after transmission is complete
-    digitalWrite(PIN_RF_SW, LOW);
-    
-    // Put SX1262 into sleep mode (retain configuration in warm start)
-    int16_t sleepState = radio.sleep(true);
-    #if DEBUG_SERIAL
-        Serial.print("SX1262 sleep(): ");
-        Serial.println(sleepState);
-    #endif
-
-    if (txState != RADIOLIB_ERR_NONE) {
+    if (!checkAck(buffer, length, frame, outAck)) {
         #if DEBUG_SERIAL
-            Serial.print("LoRa TX Error: ");
-            Serial.println(txState);
+            Serial.println("Received frame is not a valid ACK.");
         #endif
         return false;
     }
-
-    #if DEBUG_SERIAL
-        Serial.println("LoRa frame has been sent successfully.");
-        Serial.println("----------------------------------------");
-    #endif
-
     return true;
+}
+
+bool loraSendFrameWithAck(const Frame& frame, AckPayload* outAck, LoRaRxInfo* ackRxInfo) {
+    AckPayload ack;
+    LoRaRxInfo rxInfo;
+    bool success = false;
+
+    for (uint8_t attempt = 1; attempt <= LORA_MAX_ATTEMPTS && !success; attempt++) {
+        #if DEBUG_SERIAL
+            Serial.print("Attempt ");
+            Serial.print(attempt);
+            Serial.print("/");
+            Serial.print(LORA_MAX_ATTEMPTS);
+            Serial.print(", SEQ=");
+            Serial.println(frame.sequence);
+        #endif
+
+        if (loraSendFrame(frame)) {
+            success = receiveAck(frame, &ack, &rxInfo);
+        }
+    }
+
+    loraSleep();
+
+    if (success) {
+        if (outAck != nullptr)    *outAck = ack;
+        if (ackRxInfo != nullptr) *ackRxInfo = rxInfo;
+    }
+    return success;
 }

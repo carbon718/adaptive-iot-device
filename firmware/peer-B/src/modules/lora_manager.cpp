@@ -1,59 +1,25 @@
 #include "lora_manager.h"
-#include "../../../stm32/include/config.h"
+#include "config.h"
 #include <SPI.h>
 #include <RadioLib.h>
 
-static SX1262 radio = new Module(
-    PIN_NSS,
-    PIN_DIO1,
-    PIN_RST,
-    PIN_BUSY,
-    SPI
-);
+// Peer B TX power (ACK) - overrides LORA_TX_POWER from the shared config.h
+#define PEER_B_TX_POWER         2       // dBm
 
-// Flag for DIO1 interrupt (RxDone)
-static volatile bool rxDoneFlag = false;
+static SX1262 radio = new Module(PIN_NSS, PIN_DIO1, PIN_RST, PIN_BUSY, SPI);
 
-// Returns theoretical LoRa demodulation SNR limit [dB] for a given Spreading Factor
-static float getSnrDemodulationLimit(uint8_t sf) {
-    switch (sf) {
-        case 5:  return -2.5f;
-        case 6:  return -5.0f;
-        case 7:  return -7.5f;
-        case 8:  return -10.0f;
-        case 9:  return -12.5f;
-        case 10: return -15.0f;
-        case 11: return -17.5f;
-        case 12: return -20.0f;
-        default: return -12.5f;
-    }
-}
+// Set by DIO1 interrupt when a packet has been received (RxDone)
+static volatile bool packetReceived = false;
 
-// Interrupt Service Routine (ISR) triggered when RF packet reception finishes
-void onRxDoneISR() {
-    rxDoneFlag = true;
+static void onDio1ISR() {
+    packetReceived = true;
 }
 
 bool loraInit() {
-    pinMode(PIN_RF_SW, OUTPUT);
-    pinMode(PIN_NSS, OUTPUT);
-    pinMode(PIN_RST, OUTPUT);
-    pinMode(PIN_BUSY, INPUT);
-    pinMode(PIN_DIO1, INPUT);
-
-    // Keep RF switch LOW for reception path
-    digitalWrite(PIN_RF_SW, LOW);
-    digitalWrite(PIN_NSS, HIGH);
-    digitalWrite(PIN_RST, HIGH);
-
     SPI.setMISO(PIN_MISO);
     SPI.setMOSI(PIN_MOSI);
     SPI.setSCLK(PIN_SCK);
     SPI.begin();
-
-    #if DEBUG_SERIAL
-        Serial.println("SPI has been initialized.");
-    #endif
 
     int16_t state = radio.begin(
         LORA_FREQUENCY,
@@ -61,104 +27,79 @@ bool loraInit() {
         LORA_SPREADING,
         LORA_CODING_RATE,
         LORA_SYNC_WORD,
-        LORA_TX_POWER,
+        PEER_B_TX_POWER,
         LORA_PREAMBLE,
-        LORA_TCXO,
-        LORA_USE_DCDC
+        LORA_TCXO_VOLTAGE,
+        LORA_USE_LDO
     );
 
-    #if DEBUG_SERIAL
-        Serial.print("radio.begin(): ");
-        Serial.println(state);
-    #endif
-
     if (state != RADIOLIB_ERR_NONE) {
-        #if DEBUG_SERIAL
-            Serial.println("Failed to initialize LoRa SX1262 module.");
-        #endif
+        Serial.print("SX1262 init failed, code: ");
+        Serial.println(state);
         return false;
     }
 
-    // Set the DIO1 interrupt handler for RxDone event
-    radio.setDio1Action(onRxDoneISR);
+    // Wio-SX1262 RF switch: DIO2 enables TX path, RF_SW pin HIGH enables RX path
+    radio.setRfSwitchPins(PIN_RF_SW, RADIOLIB_NC);
+    radio.setDio1Action(onDio1ISR);
 
-    // Put radio into continuous receive mode
     state = radio.startReceive();
     if (state != RADIOLIB_ERR_NONE) {
-        #if DEBUG_SERIAL
-            Serial.print("Failed to start reception, code: ");
-            Serial.println(state);
-        #endif
+        Serial.print("SX1262 startReceive failed, code: ");
+        Serial.println(state);
         return false;
     }
 
-    #if DEBUG_SERIAL
-        Serial.println("LoRa SX1262 module initialized and listening.");
-    #endif
-
+    Serial.println("SX1262 initialized, listening...");
     return true;
 }
 
-bool loraReceiveMessage(
-    uint8_t* outBuffer,
-    size_t maxLength,
-    size_t* outLength,
-    LoRaPacketStats* outStats
-) {
-    if (!rxDoneFlag) {
-        return false;
+size_t loraReceive(uint8_t* buffer, size_t bufferSize, LoRaRxInfo* outInfo) {
+    if (!packetReceived) {
+        return 0;
+    }
+    packetReceived = false;
+
+    size_t length = radio.getPacketLength();
+    int16_t state = RADIOLIB_ERR_NONE;
+
+    if (length == 0 || length > bufferSize) {
+        length = 0;
+    } else {
+        state = radio.readData(buffer, length);
+        outInfo->rssi = radio.getRSSI();
+        outInfo->snr  = radio.getSNR();
     }
 
-    rxDoneFlag = false;
-
-    if (outBuffer == nullptr || outLength == nullptr) {
-        radio.startReceive();
-        return false;
-    }
-
-    size_t packetLength = radio.getPacketLength();
-    if (packetLength == 0 || packetLength > maxLength || packetLength > LORA_MAX_PHY_SIZE) {
-        #if DEBUG_SERIAL
-            Serial.print("LoRa RX Error: Invalid packet size (");
-            Serial.print(packetLength);
-            Serial.println(" B)!");
-        #endif
-        radio.startReceive();
-        return false;
-    }
-
-    int16_t state = radio.readData(outBuffer, packetLength);
+    radio.startReceive();   // re-arm receiver for the next packet
 
     if (state != RADIOLIB_ERR_NONE) {
-        #if DEBUG_SERIAL
-            Serial.print("LoRa RX Error: ");
-            Serial.println(state);
-        #endif
-        radio.startReceive();
+        Serial.print("RX error, code: ");
+        Serial.println(state);
+        return 0;
+    }
+    return length;
+}
+
+bool loraSendFrame(const Frame& frame) {
+    uint8_t buffer[LORA_MAX_PHY_SIZE];
+
+    size_t length = encodeFrame(frame, buffer, sizeof(buffer));
+    if (length == 0) {
+        Serial.println("Frame encode error.");
         return false;
     }
 
-    // Read SX1262 PHY packet status registers before re-arming receiver
-    if (outStats != nullptr) {
-        outStats->rssi              = radio.getRSSI(true);  // true = packet RSSI
-        outStats->signalRssi        = radio.getRSSI(false); // false = instantaneous/signal RSSI
-        outStats->snr               = radio.getSNR();
-        outStats->freqErrorHz       = radio.getFrequencyError();
-        outStats->freqErrorPpm      = outStats->freqErrorHz / (float)LORA_FREQUENCY;
-        outStats->snrMarginDb       = outStats->snr - getSnrDemodulationLimit(LORA_SPREADING);
-        outStats->estimatedPathLoss = (float)LORA_TX_POWER - outStats->rssi;
-        outStats->timeOnAirUs       = (uint32_t)radio.getTimeOnAir(packetLength);
+    int16_t state = radio.transmit(buffer, length);   // blocking, waits for TxDone
 
-        if (outStats->timeOnAirUs > 0) {
-            outStats->effectiveBitrateBps = ((float)packetLength * 8.0f * 1000000.0f) / (float)outStats->timeOnAirUs;
-        } else {
-            outStats->effectiveBitrateBps = 0.0f;
-        }
-    }
-
-    // Immediately re-arm receiver for the next frame
+    // TxDone also triggers DIO1 interrupt - it is not a received packet
+    packetReceived = false;
     radio.startReceive();
 
-    *outLength = packetLength;
+    if (state != RADIOLIB_ERR_NONE) {
+        Serial.print("TX error, code: ");
+        Serial.println(state);
+        return false;
+    }
     return true;
 }

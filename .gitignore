@@ -116,3 +116,8 @@ fp-info-cache
 # Local project settings
 *.kicad_prl
 
+
+# VitePress / Node
+node_modules/
+docs/.vitepress/dist/
+docs/.vitepress/cache/
