@@ -1,4 +1,0 @@
-(fp_lib_table
-	(version 7)
-	(lib (name "Wio-SX1262") (type "EasyEDA / JLCEDA Pro") (uri "${KIPRJMOD}/Libraries/Wio-SX1262/Wio-SX1262.elibz") (options "") (descr ""))
-)
